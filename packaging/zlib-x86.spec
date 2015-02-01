@@ -1,3 +1,4 @@
+%define release_prefix 9
 %define __strip /bin/true
 %define _build_name_fmt    %%{ARCH}/%%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.vanish.rpm
 # meta spec file for cross-chroot setup
@@ -22,11 +23,15 @@
 
 #
 # The original package name
+# e.g. qemu
+#
 %define oldname zlib
 
 #
 # The architectures this meta package is built on
-%define myexclusive i586
+# e.g. i586
+#
+%define myexclusive i586 x86_64
 
 #
 # The required package for building this package
@@ -41,23 +46,28 @@ BuildRequires: rpm grep tar sed patchelf
 #
 #Requires:      <usuallyemptlylist>
 
+### no changes needed below this line
+# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+### no changes needed
+
 # For a real accelerator, also the old packge is required for compatibility
 # pls change this only if you know what you do
 Requires:      %oldname
 
 #
 # Release under which to put the accelerator
-# e.g. 1 or higher
 #
-Release:       8
+Release:       %release_prefix
 
-### no changes needed below this line
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-### no changes needed
 #
-# The new package name - convention is %oldname-x86
-%define newname %{oldname}-x86
+# 64bit arch
+%ifarch x86_64
+%define x64 x64
+%endif
+#
+# The new package name - convention is %oldname-%{!?x64:x86}%{?x64}
+%define newname %{oldname}-%{!?x64:x86}%{?x64}
 #
 # The version of the original package is read from its rpm db info
 %{expand:%%define newversion %(rpm -q --qf '[%{version}]' %oldname)}
@@ -72,8 +82,8 @@ Release:       8
 %{expand:%%define newsummary %(rpm -q --qf '[%{summary} - special version ]' %oldname)}
 #
 # New rpath to add to files on request
-%define newrpath "/emul/ia32-linux/lib:/emul/ia32-linux/usr/lib"
-%define newinterpreter /emul/ia32-linux/lib/ld-linux.so.2
+%define newrpath "/emul/ia32-linux/%{_lib}:/emul/ia32-linux/usr/%{_lib}"
+%define newinterpreter /emul/ia32-linux/%{_lib}/ld-linux%{?x64:-x86-64}.so.2
 #
 # Some automatic checks for availability
 # binaries_to_prepare
@@ -117,7 +127,6 @@ It is not intended to be used on a normal system/device!
 Original description:
 %{expand:%(rpm -q --qf '[%{description}]' %oldname)}
 
-
 %prep
 
 %build
@@ -146,6 +155,13 @@ done
 # ignore default filesystem files
 for i in `rpm -ql filesystem`; do
   echo "s#^${i}\$##" >> $sedtmp
+done
+
+# ignore directories
+for i in `cat filestoinclude1`; do
+  if test -d $i ; then
+    echo "s#^${i}\$##" >> $sedtmp
+  fi
 done
 
 #finish up
@@ -177,8 +193,9 @@ rm filestoinclude2
 echo ""
 echo "[ .oO Preparing binaries Oo. ]"
 echo ""
+cat %{_sourcedir}/binaries_to_prepare | sed "s/@LIB@/%{_lib}/g" > binaries_to_prepare1
 mkdir -p %buildroot/%{_prefix}/share/applybinary/
-for binary in `cat %{_sourcedir}/binaries_to_prepare` ; do
+for binary in `cat binaries_to_prepare1` ; do
   echo "Processing binary: $binary"
   tmp="tmp.$$"
 %if %nodebug
@@ -187,11 +204,9 @@ for binary in `cat %{_sourcedir}/binaries_to_prepare` ; do
   debug="--debug"
 %endif
   if file $binary | grep -q dynamic; then
-    ldd $binary  | grep -v "ld-linux" | grep -v "linux-gate" |  sed -e "s#=.*##g" -e "s#^\t*##g"  > $tmp
-    deps=$(for i in `cat $tmp` ; do rpm -q --whatprovides "$i" | grep -v "no package"; done)
+    ldd $binary  | grep -v "ld-linux" | grep -v "linux-gate" | grep -v "linux-vdso" |  sed -e "s#=.*##g" -e "s#^\t*##g"  > $tmp
+    deps=$(for i in `cat $tmp` ; do rpm -q --whatprovides "${i}%{?x64:()(64bit)}" | grep -v "no package"; done)
     cleandeps=$(echo "$cleandeps" "$deps" | sort | uniq | sed -e "s/-[0-9].*//g")
-    patchelf $debug --set-rpath %newrpath %buildroot/$binary
-    patchelf $debug --set-interpreter %newinterpreter %buildroot/$binary
     patchelf $debug --set-rpath %newrpath %buildroot/$binary
     patchelf $debug --set-interpreter %newinterpreter %buildroot/$binary
     if test -n "$debug"; then
@@ -209,6 +224,7 @@ done
 echo ""
 echo "[ .oO Preparing libraries Oo. ]"
 echo ""
+cat %{_sourcedir}/libraries_to_prepare | sed "s/@LIB@/%{_lib}/g" > libraries_to_prepare1
 %endif
 
 # stub
@@ -244,7 +260,7 @@ shellquote "  targettype arm autoreqprov off" >> /tmp/baselibs_new.conf
 
 # automagically fill in basic requirements
 for i in $cleandeps ; do 
-  shellquote "  targettype arm requires \"${i}-x86-arm\"" >> /tmp/baselibs_new.conf
+  shellquote "  targettype arm requires \"${i}-%{!?x64:x86}%{?x64}-arm\"" >> /tmp/baselibs_new.conf
 done
 
 # we require the native version
@@ -261,7 +277,7 @@ shellquote "  targettype arm requires \"tizen-accelerator\"" >> /tmp/baselibs_ne
 # replace native with x86 binaries as defined in file
 %if %binaries_to_prepare
 # Todo: error handling if .orig-arm is present
-for binary in `cat %{_sourcedir}/binaries_to_prepare` ; do
+for binary in `cat binaries_to_prepare1` ; do
    shellquote "  targettype arm post \"  if test -e ${binary}.orig-arm -a -h ${binary}; then \" " >> /tmp/baselibs_new.conf
    shellquote "  targettype arm post \"    echo \"${binary}.orig-arm already present - skipping.\" \" " >> /tmp/baselibs_new.conf
    shellquote "  targettype arm post \"  else \" " >> /tmp/baselibs_new.conf
@@ -270,10 +286,30 @@ for binary in `cat %{_sourcedir}/binaries_to_prepare` ; do
 done
 
 shellquote " " >> /tmp/baselibs_new.conf
-for binary in `cat %{_sourcedir}/binaries_to_prepare` ; do
+for binary in `cat binaries_to_prepare1` ; do
 
   shellquote "  targettype arm preun \"  if test -e ${binary}.orig-arm ; then \"" >> /tmp/baselibs_new.conf
   shellquote "  targettype arm preun \"    rm -f ${binary} ; mv ${binary}.orig-arm ${binary}\"" >> /tmp/baselibs_new.conf
+  shellquote "  targettype arm preun \"  fi \"" >> /tmp/baselibs_new.conf
+
+done
+%endif
+
+%if %libraries_to_prepare
+# Todo: error handling if .orig-arm is present
+for library in `cat libraries_to_prepare1` ; do
+   shellquote "  targettype arm post \"  if test -e ${library}.orig-arm -a -h ${library}; then \" " >> /tmp/baselibs_new.conf
+   shellquote "  targettype arm post \"    echo \"${library}.orig-arm already present - skipping.\" \" " >> /tmp/baselibs_new.conf
+   shellquote "  targettype arm post \"  else \" " >> /tmp/baselibs_new.conf
+   shellquote "  targettype arm post \"    mv ${library} ${library}.orig-arm ; ln -s <prefix>${library} ${library} \"" >> /tmp/baselibs_new.conf
+   shellquote "  targettype arm post \"  fi \" " >> /tmp/baselibs_new.conf
+done
+
+shellquote " " >> /tmp/baselibs_new.conf
+for library in `cat libraries_to_prepare1` ; do
+
+  shellquote "  targettype arm preun \"  if test -e ${library}.orig-arm ; then \"" >> /tmp/baselibs_new.conf
+  shellquote "  targettype arm preun \"    rm -f ${library} ; mv ${library}.orig-arm ${library}\"" >> /tmp/baselibs_new.conf
   shellquote "  targettype arm preun \"  fi \"" >> /tmp/baselibs_new.conf
 
 done
